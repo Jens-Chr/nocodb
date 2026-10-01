@@ -1,0 +1,132 @@
+name: sali-nocodb
+
+x-nocodb-environment: &nocodb-environment
+  NC_DB: "pg://nocodb-postgres:5432?u=nocodb&p=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}&d=nocodb"
+  NC_AUTH_JWT_SECRET: "${NC_AUTH_JWT_SECRET:?Set NC_AUTH_JWT_SECRET in .env}"
+  NC_CACHE_REDIS_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@nocodb-redis:6379/0"
+  NC_JOBS_REDIS_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@nocodb-redis:6379/1"
+  NC_SITE_URL: "${NC_SITE_URL:-http://localhost:8081}"
+  NC_APP_DATA_DIR: /usr/app/data
+
+x-nocodb-common: &nocodb-common
+  image: nocodb/nocodb:2026.09.0
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  volumes:
+    - nocodb-data:/usr/app/data
+
+services:
+  nocodb:
+    <<: *nocodb-common
+    environment:
+      <<: *nocodb-environment
+      NC_DISABLE_MUX: "true"
+    depends_on:
+      nocodb-postgres:
+        condition: service_healthy
+      nocodb-redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8081:8080"
+    networks:
+      nocodb-internal:
+      n8n-network:
+        aliases:
+          - sali-nocodb
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "--spider", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  nocodb-worker:
+    <<: *nocodb-common
+    environment:
+      <<: *nocodb-environment
+      NC_WORKER_MODE_ENABLED: "true"
+      # 2026.09.0 still checks this alias when suppressing cache resets.
+      NC_WORKER_CONTAINER: "true"
+    depends_on:
+      nocodb:
+        condition: service_healthy
+      nocodb-postgres:
+        condition: service_healthy
+      nocodb-redis:
+        condition: service_healthy
+    networks:
+      - nocodb-internal
+
+  nocodb-postgres:
+    image: postgres:17.10
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nocodb
+      POSTGRES_USER: nocodb
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - nocodb-internal
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "nocodb", "-d", "nocodb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  nocodb-redis:
+    image: redis:7.4.8-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
+    command:
+      - /bin/sh
+      - -ec
+      - 'exec /usr/local/bin/docker-entrypoint.sh redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    volumes:
+      - redis-data:/data
+    networks:
+      - nocodb-internal
+    healthcheck:
+      test: ["CMD-SHELL", 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -qx PONG']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  nocodb-internal:
+    driver: bridge
+    internal: true
+  n8n-network:
+    external: true
+    name: n8n-network
+
+volumes:
+  postgres-data:
+  redis-data:
+  nocodb-data:
